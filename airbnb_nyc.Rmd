@@ -1,0 +1,167 @@
+---
+title: "Airbnb Listings in New York City"
+output: html_notebook
+---
+We want to get a general idea of how the listings are distributed across different boroughs and how the prices vary between neighborhoods. What kinds of listings exist? Then we want to find a way to predict the location of a listing. The 'id' and 'host_id' columns are not very useful for what we will be doing and so we remove them. We also filtered some rows where the price was listed as zero. This was mostly likely a mistake and these zero values would have given us trouble when creating a model or boxplots(which we did down below and had to perform a log transform. The zero values will tend to infinity and thus that row will be excluded automatically).
+
+```{r}
+#loading packages 
+library(tidyverse)
+library(ggplot2)
+library(ggmap)
+library(corrplot)
+library(e1071)
+library(caret)
+
+#loading data set
+listings <- read_csv('AB_NYC_2019.csv')
+
+#creating dataframe without id and host_id
+airbnb <- listings %>% select(-id,-host_id) %>% filter(price > 0)
+
+head(airbnb)
+```
+
+We want to see how many rooms are listed in each borough. Furthermore, we want to see what type of rooms are available among these listings. 
+
+```{r}
+#Creating a bar graph
+ggplot(data=airbnb, aes(x=neighbourhood_group)) + 
+  geom_bar(aes(fill=room_type)) +
+  labs(title = 'Number of Listings Across Different Boroughs', 
+       y = 'Count', x = 'Borough', fill = 'Room Type')
+```
+From the above graph it is clear that almost all of our listings are in either Brooklyn or Manhattan. This seems to make sense since Manhattan is the most densely populated borough and Brookyln is second. Queens on the other hand has a similar population size to Brooklyn but almost half the density. This may explain why there are less listings in Queens,since the farther out you go, the more difficult it may be to travel to sights. 
+
+Now we want to see how price varies from different locations.To see price distribution we can create a box plot but we had to perform a log transform to be able to see our plots. 
+
+```{r}
+ggplot() +
+  geom_boxplot(data=airbnb, 
+              aes(x=neighbourhood_group, y=price, fill=room_type)) +
+  scale_y_log10() +
+  labs(title = 'Price', x = 'Borough', fill = 'Room Type')
+```
+
+To see how the price varies in different locations within each borough we will create a simple heat map. To get the coordinates, we used bboxfinder.com and drew a polygon around the city of New York. It is quite clear from above that our prices are skewed. So we again performed a log transform for our data. 
+
+```{r}
+#loading map of NYC using coordinates
+nyc_bb <- c(left = -74.286804,
+            bottom = 40.494720,
+            right = -73.704529,
+            top = 40.941480)
+
+#these values are from the five number summary minus the min
+my_breaks = c(69, 106, 175, 10000)
+
+#getting map based on coordinates
+nyc_stamen <- get_stamenmap(bbox = nyc_bb, zoom = 11)
+
+#creating map
+ggmap(nyc_stamen) + 
+  geom_point(data=airbnb,aes(x=longitude ,y=latitude,color=price), size = .3) +
+  scale_color_gradientn(colours = terrain.colors(10),trans = "log", breaks=my_breaks,)
+
+```
+
+From this map we can see two things. That most of the listings are more expense around southern part of Manhattan and right across it. Secondly, most of the listings do cluster around Manhattan.
+
+We want to see what kind of relationship exists within our data. To see this we can create a correlation matrix. We have to consider two things when creating our matrix. Does our data have linear relationships? Yes, but none of these are really valuable to us. Thus, we will use Spearmans.
+
+```{R}
+#we make sure that our values are numerical 
+airbnb_numerical <- airbnb[, sapply(airbnb, is.numeric)]
+
+#dealing with missing values
+airbnb_numerical <- airbnb_numerical[complete.cases(airbnb_numerical), ]
+
+#creating matrix
+correlation_matrix <- cor(airbnb_numerical,method = "spearman")
+corrplot(correlation_matrix, method = "color")
+
+```
+
+There does seem to be some correlation between price and longitude cordinate. Along with price, can we use any other variable as features to predict the location of a listing? 
+
+Naive Bayes is a classifier which uses probability to determine an outcome(target, class, depenedent variable) from some given predictors (features, covarites, independent variables). In other words, suppose we are given a set of $n$ predictors \[X_1,X_2, \cdots X_n\] and at outsome variable $y$ coming from $k$ classes \[C_1,C_2, \cdots, C_k\].
+
+Bayes Theorem lets us write this as \[P(C_k|X_1,X_2, \cdots , X_n) = \frac{P(C_k)P(X_1,X_2, \cdots, X_n|C_k)}{P(X_1, X_2, \cdots, X_n)}\] 
+
+The top is clearly a joint probability. Therefore, if our predictors are independent we can write \[P(A|B,C) = P(A|C)\]. This fact allows us to pull variables in pour equation one by one to get the following \[P(C_k)P(X_n|C_k)P(X_{n-1}|X_n,C_k) \cdots P(X_1|X_2, \cdots , X_n,C_k)\]
+
+This above eqaution is still quite tedious but we make the assumption that our varaibles are independent given a class $C_k$. We reduce our equation to the following \[P(C_k)\prod_{j=1}^{n} P(X_j|C_k)\], where the first term is termed the prior and the second term is called the likelihood. The prior can be calculated as $\frac{n_{\text{class}}}{n_{\text{total}}}$. Our final equation becomes \[P(C_k|X_1,X_2,\cdots, X_n) = \frac{P(C_k)\prod_{j=1}^{n} P(X_j|C_k)}{P(X_1,X_2, \cdots, X_n)}\]
+
+The bottom term is actually a constant and therefore we need to only calculate the numerator. With the mathematics out of the way, we can begin to look at our data and pick our predictors. 
+
+At the heart of the naive Bayes classifier is \[P(A|B,C) = P(A|C)\] which lets us simplify things considerably. But for the above eqaution to hold, our features need to be normally distribution. As we have seem before, our price column is skewed. We could get rid of the outliers, but since these prices are not mistakes, that is not appropriate. So we will transform our data. The second assumption we make is that our features are independent and from our correlation matrix it is clear that we cannot pick both reviews per month and number of reviews. But we will pick one and pair it with price as our intial choice of features. From this we will try to determine what borough a listing is from.
+
+```{r}
+ggplot(airbnb,aes(x=number_of_reviews)) + 
+  geom_density()
+```
+
+To start, let us split our data into a training set and a test set. We will use 70 percent of our data for training our model and the rest to test the model.
+
+
+```{r}
+
+#normalizing data
+airbnb$price <- log1p(airbnb$price)
+airbnb$number_of_reviews <- log1p(airbnb$number_of_reviews)
+
+#sum(is.na(airbnb$price)) <- checking for NA values
+#sum(is.na(airbnb$price))
+
+#converting dep. var from character to factor type, needed if using e1071
+airbnb$neighbourhood_group <- as.factor(airbnb$neighbourhood_group)
+
+#spliting data
+set.seed(7267166)
+trainIndex=createDataPartition(airbnb$neighbourhood_group,p=0.7)$Resample1
+train=airbnb[trainIndex, ]
+test=airbnb[-trainIndex, ]
+```
+
+
+```{r}
+#build classifier
+nb_classifier=naiveBayes(neighbourhood_group~price+number_of_reviews,data=train)
+```
+
+```{r}
+printALL=function(model){
+  trainPred <- predict(model, newdata=train, type="class")
+  trainTable <- table(train$neighbourhood_group, trainPred)
+  testPred <- predict(nb_classifier, newdata=test, type="class")
+  testTable <- table(test$neighbourhood_group, testPred)
+  trainAcc <- (trainTable[1,1]+trainTable[2,2]+trainTable[3,3])/sum(trainTable)
+  testAcc <- (testTable[1,1]+testTable[2,2]+testTable[3,3])/sum(testTable)
+  message("Contingency Table for Training Data")
+  print(trainTable)
+  message("Contingency Table for Test Data")
+  print(testTable)
+  message("Accuracy")
+  print(round(cbind(trainAccuracy=trainAcc, testAccuracy=testAcc),3))
+  
+}
+
+printALL(nb_classifier)
+
+```
+
+Our model is correct about ~52-54 percent of the time during testing. This is a significant improvement from an earlier run where the independent variables were not normalized and not factors. During that run our accuracy was just above ~40 percent. Interestingly, the value type (factor or numeric) seems to make no difference if data is normalized.But it does seem that the type of input can make a difference. One more thing we can check is to see if price is the only thing that matters, or wether the other variables matter or not.
+
+```{r}
+nb2_classifier=naiveBayes(neighbourhood_group~price,data=train)
+printALL(nb2_classifier)
+```
+
+It does not seem that the number of reviews mattered. This is not suprising since only price seemed to be correlated in our matrix. Our accuracy overall is not great but is a massive improvement from the initial model
+
+```{r}
+nb3_classifier=naiveBayes(neighbourhood_group~price+room_type+number_of_reviews,data=train)
+printALL(nb3_classifier)
+```
+
+
